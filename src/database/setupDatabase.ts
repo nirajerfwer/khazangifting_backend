@@ -97,6 +97,8 @@ export const setupDatabase = async () => {
         total_amount NUMERIC(10,2) NOT NULL,
         status VARCHAR(50) NOT NULL DEFAULT 'PENDING_PAYMENT',
         shipping_address JSONB NOT NULL,
+        razorpay_order_id VARCHAR(100) UNIQUE,
+        razorpay_payment_id VARCHAR(100) UNIQUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
@@ -113,6 +115,13 @@ export const setupDatabase = async () => {
         END IF;
       END
       $$;
+    `);
+
+    await pool.query(`
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS razorpay_order_id VARCHAR(100) UNIQUE;
+    `);
+    await pool.query(`
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS razorpay_payment_id VARCHAR(100) UNIQUE;
     `);
 
     // ORDER ITEMS — price is a snapshot of the product price at order time

@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { pool } from "../database/db";
 import { recordAuditLog } from "../utils/auditLog";
+import { razorpay } from "../utils/razorpay";
 
 const VALID_TRANSITIONS: Record<string, string[]> = {
   PENDING_PAYMENT: ["PAID", "CANCELLED"],
@@ -75,7 +76,7 @@ export const createOrder = async (req: Request, res: Response) => {
        VALUES ($1, $2, 'PENDING_PAYMENT', $3) RETURNING *`,
       [userId, totalAmount, JSON.stringify(shippingAddress)]
     );
-    const order = orderResult.rows[0];
+    let order = orderResult.rows[0];
 
     for (const item of orderItems) {
       await client.query(
@@ -90,9 +91,32 @@ export const createOrder = async (req: Request, res: Response) => {
 
     await client.query("DELETE FROM cart_items WHERE cart_id = $1", [cartId]);
 
+    // Create the Razorpay order before committing so we never leave a DB order
+    // without a matching payment-gateway order to pay against.
+    const razorpayOrder = await razorpay.orders.create({
+      amount: Math.round(totalAmount * 100), // paise
+      currency: "INR",
+      receipt: order.id,
+      notes: { orderId: order.id, userId },
+    });
+
+    const updated = await client.query(
+      "UPDATE orders SET razorpay_order_id=$1 WHERE id=$2 RETURNING *",
+      [razorpayOrder.id, order.id]
+    );
+    order = updated.rows[0];
+
     await client.query("COMMIT");
 
-    res.status(201).json({ success: true, data: { ...order, items: orderItems } });
+    res.status(201).json({
+      success: true,
+      data: {
+        ...order,
+        items: orderItems,
+        razorpayOrderId: razorpayOrder.id,
+        razorpayKeyId: process.env.RAZORPAY_KEY_ID,
+      },
+    });
   } catch (error) {
     await client.query("ROLLBACK");
     console.error("createOrder error:", error);

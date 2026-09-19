@@ -11,12 +11,20 @@ import Crouter from "./routes/categoryRoutes";
 import Blogrouter from "./routes/blogsRoutes";
 import authRouter from "./routes/authRoutes";
 import orderRouter from "./routes/orderRoutes";
+import adminRouter from "./routes/adminRoutes";
+import paymentRouter from "./routes/paymentRoutes";
+import { razorpayWebhook } from "./Controller/paymentController";
 
 dotenv.config();
 
 const app = express();
 
 app.use(helmet());
+
+// Webhook needs the raw request body to verify Razorpay's signature, so it must be
+// registered before the global express.json() parser consumes the stream.
+app.post("/api/payments/webhook", express.raw({ type: "application/json" }), razorpayWebhook);
+
 app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 
@@ -41,6 +49,8 @@ app.use("/api/auth", authRouter);
 app.use("/api/cart", cartRoutes);
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/orders", orderRouter);
+app.use("/api/admin", adminRouter);
+app.use("/api/payments", paymentRouter);
 app.use("/products", Prouter);
 app.use("/category", Crouter);
 app.use("/blog", Blogrouter);
