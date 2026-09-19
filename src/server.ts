@@ -13,6 +13,7 @@ import authRouter from "./routes/authRoutes";
 import orderRouter from "./routes/orderRoutes";
 import adminRouter from "./routes/adminRoutes";
 import paymentRouter from "./routes/paymentRoutes";
+import accountRouter from "./routes/accountRoutes";
 import { razorpayWebhook } from "./Controller/paymentController";
 
 dotenv.config();
@@ -51,6 +52,7 @@ app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/orders", orderRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/payments", paymentRouter);
+app.use("/api/account", accountRouter);
 app.use("/products", Prouter);
 app.use("/category", Crouter);
 app.use("/blog", Blogrouter);
