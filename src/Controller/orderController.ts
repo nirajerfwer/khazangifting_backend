@@ -159,6 +159,29 @@ export const getMyOrderById = async (req: Request, res: Response) => {
   }
 };
 
+// Admin: fetch any order by id, regardless of owner
+export const getOrderByIdAdmin = async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  try {
+    const order = await pool.query(
+      `SELECT o.*, u.name AS customer_name, u.email AS customer_email
+       FROM orders o
+       LEFT JOIN users u ON u.id = o.user_id
+       WHERE o.id=$1`,
+      [id]
+    );
+    if (order.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Order not found", code: "NOT_FOUND" });
+    }
+    const items = await pool.query("SELECT * FROM order_items WHERE order_id=$1", [id]);
+    const history = await pool.query("SELECT * FROM order_status_history WHERE order_id=$1 ORDER BY created_at ASC", [id]);
+    res.json({ success: true, data: { ...order.rows[0], items: items.rows, history: history.rows } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch order", code: "SERVER_ERROR" });
+  }
+};
+
 // Admin: list/filter/paginate all orders
 export const listOrders = async (req: Request, res: Response) => {
   const page = Math.max(1, parseInt(req.query.page as string) || 1);

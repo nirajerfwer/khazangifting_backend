@@ -1,5 +1,5 @@
 import express from "express";
-import { createBlog, deleteBlog, getBlogBySlug, getBlogs, updateBlog } from "../Controller/BlogsController";
+import { createBlog, deleteBlog, getBlogByIdAdmin, getBlogBySlug, getBlogs, updateBlog } from "../Controller/BlogsController";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { validateBody } from "../middleware/validate";
 import { createBlogSchema, updateBlogSchema } from "../validators/blogValidator";
@@ -13,6 +13,7 @@ const optionalAuth = (req: express.Request, _res: express.Response, next: expres
 };
 
 Blogrouter.get("/", optionalAuth, getBlogs);
+Blogrouter.get("/admin/:id", requireAuth, requireRole("ADMIN", "SUPER_ADMIN"), getBlogByIdAdmin);
 Blogrouter.get("/:slug", optionalAuth, getBlogBySlug);
 Blogrouter.post("/", requireAuth, requireRole("ADMIN", "SUPER_ADMIN"), validateBody(createBlogSchema), createBlog);
 Blogrouter.put("/:id", requireAuth, requireRole("ADMIN", "SUPER_ADMIN"), validateBody(updateBlogSchema), updateBlog);

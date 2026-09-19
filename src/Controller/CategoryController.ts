@@ -4,13 +4,14 @@ import { pool } from "../database/db";
 // GET all categories
 export const getCategorys = async (req: Request, res: Response) => {
   try {
-    const result = await pool.query(`SELECT 
+    const result = await pool.query(`SELECT
   cat.name,cat.id,
   COUNT(pc.product_id) AS product_count
 FROM categories AS cat
-JOIN product_categories AS pc 
+LEFT JOIN product_categories AS pc
   ON cat.id = pc.category_id
-GROUP BY cat.id, cat.name;`);
+GROUP BY cat.id, cat.name
+ORDER BY cat.name;`);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch categories" });

@@ -61,6 +61,29 @@ export const getBlogBySlug = async (req: Request, res: Response) => {
   }
 };
 
+// GET single blog by id (admin only — includes unpublished/drafts, used for the edit form)
+export const getBlogByIdAdmin = async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  try {
+    const result = await pool.query(
+      `SELECT b.id, b.title, b.slug, b.excerpt, b.content, b.cover_image, b.published, b.published_at, b.created_at, b.updated_at
+       FROM blogs AS b
+       WHERE b.id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Blog not found", code: "NOT_FOUND" });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error("getBlogByIdAdmin error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch blog", code: "SERVER_ERROR" });
+  }
+};
+
 // CREATE Blog (admin only, body validated by validateBody(createBlogSchema))
 export const createBlog = async (req: Request, res: Response) => {
   const { title, slug, excerpt, content, cover_image, published } = req.body;
