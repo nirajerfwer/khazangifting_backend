@@ -1,167 +1,155 @@
 import { Request, Response } from "express";
 import { pool } from "../database/db";
 
-export const addToCart = async (req: Request, res: Response) => {
-  const { user_id, product_id, quantity } = req.body;
-  // will get user_id from backend...
-  
-  try {
-    // 1. Get or create cart
-    let cart = await pool.query(
-      "SELECT * FROM carts WHERE user_id = $1",
-      [user_id]
-    );
+const getOrCreateCartId = async (userId: string) => {
+  const existing = await pool.query("SELECT id FROM carts WHERE user_id = $1", [userId]);
+  if (existing.rows.length > 0) return existing.rows[0].id;
 
-    if (cart.rows.length === 0) {
-      cart = await pool.query(
-        "INSERT INTO carts (user_id) VALUES ($1) RETURNING *",
-        [user_id]
-      );
+  const created = await pool.query("INSERT INTO carts (user_id) VALUES ($1) RETURNING id", [userId]);
+  return created.rows[0].id;
+};
+
+export const addToCart = async (req: Request, res: Response) => {
+  const userId = req.user!.sub;
+  const { product_id, quantity } = req.body;
+
+  const qty = Number(quantity) || 1;
+  if (qty <= 0) {
+    return res.status(400).json({ success: false, message: "Quantity must be > 0", code: "INVALID_QUANTITY" });
+  }
+
+  try {
+    const product = await pool.query("SELECT id FROM products WHERE id=$1", [product_id]);
+    if (product.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Product not found", code: "NOT_FOUND" });
     }
 
-    const cart_id = cart.rows[0].id;
+    const cartId = await getOrCreateCartId(userId);
 
-    // 2. Insert or update cart item
     const result = await pool.query(
-      `
-      INSERT INTO cart_items (cart_id, product_id, quantity)
-      VALUES ($1, $2, $3)
-      ON CONFLICT (cart_id, product_id)
-      DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity,
-                    updated_at = NOW()
-      RETURNING *;
-      `,
-      [cart_id, product_id, quantity || 1]
+      `INSERT INTO cart_items (cart_id, product_id, quantity)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (cart_id, product_id)
+       DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity, updated_at = NOW()
+       RETURNING *`,
+      [cartId, product_id, qty]
     );
 
-    res.json(result.rows[0]);
+    res.json({ success: true, data: result.rows[0] });
   } catch (error) {
-    res.status(500).json({ error: "Failed to add to cart" });
+    console.error("addToCart error:", error);
+    res.status(500).json({ success: false, message: "Failed to add to cart", code: "SERVER_ERROR" });
   }
 };
 
-export const getCart = async (req: any, res: any) => {
-  const { user_id } = req.params;
+export const getCart = async (req: Request, res: Response) => {
+  const userId = req.user!.sub;
 
   try {
     const result = await pool.query(
-      `
-      SELECT 
-        ci.id,
-        ci.quantity,
-        p.id as product_id,
-        p.name,
-        p.price,
-        p.description,
-        (ci.quantity * p.price) as total_price
-      FROM carts c
-      JOIN cart_items ci ON c.id = ci.cart_id
-      JOIN products p ON p.id = ci.product_id
-      WHERE c.user_id = $1
-      ORDER BY ci.created_at DESC
-      `,
-      [user_id]
+      `SELECT ci.id, ci.quantity, p.id as product_id, p.name, p.price, p.stock,
+              (ci.quantity * p.price) as total_price
+       FROM carts c
+       JOIN cart_items ci ON c.id = ci.cart_id
+       JOIN products p ON p.id = ci.product_id
+       WHERE c.user_id = $1
+       ORDER BY ci.created_at DESC`,
+      [userId]
     );
 
-    const totalAmount = result.rows.reduce(
-      (sum, item) => sum + Number(item.total_price),
-      0
-    );
+    const totalAmount = result.rows.reduce((sum, item) => sum + Number(item.total_price), 0);
 
-    res.json({
-      items: result.rows,
-      totalAmount,
-    });
+    res.json({ success: true, data: { items: result.rows, totalAmount } });
   } catch (error) {
-    res.status(500).json({ error: "Failed to fetch cart" });
+    console.error("getCart error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch cart", code: "SERVER_ERROR" });
   }
 };
 
-export const removeFromCart = async (req: any, res: any) => {
+export const removeFromCart = async (req: Request, res: Response) => {
+  const userId = req.user!.sub;
   const { cart_item_id } = req.params;
 
   try {
-    await pool.query(
-      `DELETE FROM cart_items WHERE id = $1`,
-      [cart_item_id]
+    const result = await pool.query(
+      `DELETE FROM cart_items ci
+       USING carts c
+       WHERE ci.id = $1 AND ci.cart_id = c.id AND c.user_id = $2
+       RETURNING ci.id`,
+      [cart_item_id, userId]
     );
 
-    res.json({ message: "Item removed from cart" });
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Cart item not found", code: "NOT_FOUND" });
+    }
+
+    res.json({ success: true, message: "Item removed from cart" });
   } catch (error) {
-    res.status(500).json({ error: "Failed to remove item" });
+    console.error("removeFromCart error:", error);
+    res.status(500).json({ success: false, message: "Failed to remove item", code: "SERVER_ERROR" });
   }
 };
 
-export const updateCartQuantity = async (req: any, res: any) => {
+export const updateCartQuantity = async (req: Request, res: Response) => {
+  const userId = req.user!.sub;
   const { cart_item_id } = req.params;
   const { quantity } = req.body;
 
-  if (quantity <= 0) {
-    return res.status(400).json({ error: "Quantity must be > 0" });
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    return res.status(400).json({ success: false, message: "Quantity must be a positive integer", code: "INVALID_QUANTITY" });
   }
 
   try {
     const result = await pool.query(
-      `
-      UPDATE cart_items
-      SET quantity = $1, updated_at = NOW()
-      WHERE id = $2
-      RETURNING *
-      `,
-      [quantity, cart_item_id]
+      `UPDATE cart_items ci
+       SET quantity = $1, updated_at = NOW()
+       FROM carts c
+       WHERE ci.id = $2 AND ci.cart_id = c.id AND c.user_id = $3
+       RETURNING ci.*`,
+      [quantity, cart_item_id, userId]
     );
 
-    res.json(result.rows[0]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Cart item not found", code: "NOT_FOUND" });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
   } catch (error) {
-    res.status(500).json({ error: "Failed to update quantity" });
+    console.error("updateCartQuantity error:", error);
+    res.status(500).json({ success: false, message: "Failed to update quantity", code: "SERVER_ERROR" });
   }
 };
 
-export const moveWishlistToCart = async (req: any, res: any) => {
-  const { user_id, product_id } = req.body;
+export const moveWishlistToCart = async (req: Request, res: Response) => {
+  const userId = req.user!.sub;
+  const { product_id } = req.body;
 
   try {
-    // 1. Get or create cart
-    let cart = await pool.query(
-      "SELECT * FROM carts WHERE user_id = $1",
-      [user_id]
-    );
-
-    if (cart.rows.length === 0) {
-      cart = await pool.query(
-        "INSERT INTO carts (user_id) VALUES ($1) RETURNING *",
-        [user_id]
-      );
+    const product = await pool.query("SELECT id FROM products WHERE id=$1", [product_id]);
+    if (product.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Product not found", code: "NOT_FOUND" });
     }
 
-    const cart_id = cart.rows[0].id;
+    const cartId = await getOrCreateCartId(userId);
 
-    // 2. Add to cart
     await pool.query(
-      `
-      INSERT INTO cart_items (cart_id, product_id, quantity)
-      VALUES ($1, $2, 1)
-      ON CONFLICT (cart_id, product_id)
-      DO UPDATE SET quantity = cart_items.quantity + 1,
-                    updated_at = NOW()
-      `,
-      [cart_id, product_id]
+      `INSERT INTO cart_items (cart_id, product_id, quantity)
+       VALUES ($1, $2, 1)
+       ON CONFLICT (cart_id, product_id)
+       DO UPDATE SET quantity = cart_items.quantity + 1, updated_at = NOW()`,
+      [cartId, product_id]
     );
 
-    // 3. Remove from wishlist
     await pool.query(
-      `
-      DELETE FROM wishlist_items
-      WHERE product_id = $1
-      AND wishlist_id = (
-        SELECT id FROM wishlists WHERE user_id = $2
-      )
-      `,
-      [product_id, user_id]
+      `DELETE FROM wishlist_items
+       WHERE product_id = $1
+       AND wishlist_id = (SELECT id FROM wishlists WHERE user_id = $2)`,
+      [product_id, userId]
     );
 
-    res.json({ message: "Moved to cart successfully" });
+    res.json({ success: true, message: "Moved to cart successfully" });
   } catch (error) {
-    res.status(500).json({ error: "Failed to move item" });
+    console.error("moveWishlistToCart error:", error);
+    res.status(500).json({ success: false, message: "Failed to move item", code: "SERVER_ERROR" });
   }
 };

@@ -1,8 +1,11 @@
 import express from "express";
 import { createProduct, createProductByLookingAtSheet, deleteProduct, getProducts, getSingleProduct, updateProduct } from "../Controller/productController";
 import { requireAuth, requireRole } from "../middleware/auth";
+import productImageRoutes from "./productImageRoutes";
 
 const Prouter = express.Router();
+
+Prouter.use("/:productId/images", productImageRoutes);
 
 Prouter.get("/", getProducts);
 Prouter.get("/:id", getSingleProduct);

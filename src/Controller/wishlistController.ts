@@ -1,103 +1,82 @@
 import { Request, Response } from "express";
 import { pool } from "../database/db";
 
-export const addToWishlist = async (req: Request, res: Response) => {
-  const { user_id, product_id } = req.body;
-  //TODO user_id will get from backend
-  try {
-    // 1. Get or create wishlist
-    let wishlist = await pool.query(
-      "SELECT * FROM wishlists WHERE user_id = $1",
-      [user_id]
-    );
+const getOrCreateWishlistId = async (userId: string) => {
+  const existing = await pool.query("SELECT id FROM wishlists WHERE user_id = $1", [userId]);
+  if (existing.rows.length > 0) return existing.rows[0].id;
 
-    if (wishlist.rows.length === 0) {
-      wishlist = await pool.query(
-        "INSERT INTO wishlists (user_id) VALUES ($1) RETURNING *",
-        [user_id]
-      );
+  const created = await pool.query("INSERT INTO wishlists (user_id) VALUES ($1) RETURNING id", [userId]);
+  return created.rows[0].id;
+};
+
+export const addToWishlist = async (req: Request, res: Response) => {
+  const userId = req.user!.sub;
+  const { product_id } = req.body;
+
+  try {
+    const product = await pool.query("SELECT id FROM products WHERE id=$1", [product_id]);
+    if (product.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Product not found", code: "NOT_FOUND" });
     }
 
-    const wishlist_id = wishlist.rows[0].id;
+    const wishlistId = await getOrCreateWishlistId(userId);
 
-    // 2. Insert item (ignore duplicates)
     const result = await pool.query(
-      `
-      INSERT INTO wishlist_items (wishlist_id, product_id)
-      VALUES ($1, $2)
-      ON CONFLICT (wishlist_id, product_id) DO NOTHING
-      RETURNING *;
-      `,
-      [wishlist_id, product_id]
+      `INSERT INTO wishlist_items (wishlist_id, product_id)
+       VALUES ($1, $2)
+       ON CONFLICT (wishlist_id, product_id) DO NOTHING
+       RETURNING *`,
+      [wishlistId, product_id]
     );
 
-    res.json({
-      message: "Added to wishlist",
-      data: result.rows[0] || null,
-    });
+    res.json({ success: true, message: "Added to wishlist", data: result.rows[0] || null });
   } catch (error) {
-    res.status(500).json({ error: "Failed to add to wishlist" });
+    console.error("addToWishlist error:", error);
+    res.status(500).json({ success: false, message: "Failed to add to wishlist", code: "SERVER_ERROR" });
   }
 };
 
 export const getWishlist = async (req: Request, res: Response) => {
-  const { user_id } = req.params;
+  const userId = req.user!.sub;
 
   try {
     const result = await pool.query(
-      `
-      SELECT 
-        wi.id as wishlist_item_id,
-        p.id as product_id,
-        p.name,
-        p.description,
-        p.price,
-        p.stock,
-        wi.created_at
-      FROM wishlists w
-      JOIN wishlist_items wi ON w.id = wi.wishlist_id
-      JOIN products p ON p.id = wi.product_id
-      WHERE w.user_id = $1
-      ORDER BY wi.created_at DESC
-      `,
-      [user_id]
+      `SELECT wi.id as wishlist_item_id, p.id as product_id, p.name, p.description, p.price, p.stock, wi.created_at
+       FROM wishlists w
+       JOIN wishlist_items wi ON w.id = wi.wishlist_id
+       JOIN products p ON p.id = wi.product_id
+       WHERE w.user_id = $1
+       ORDER BY wi.created_at DESC`,
+      [userId]
     );
 
-    res.json({
-      count: result.rows.length,
-      items: result.rows,
-    });
+    res.json({ success: true, data: { count: result.rows.length, items: result.rows } });
   } catch (error) {
-    res.status(500).json({ error: "Failed to fetch wishlist" });
+    console.error("getWishlist error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch wishlist", code: "SERVER_ERROR" });
   }
 };
 
 export const removeFromWishlist = async (req: Request, res: Response) => {
+  const userId = req.user!.sub;
   const { wishlist_item_id } = req.params;
-  const { user_id } = req.body;
 
   try {
     const result = await pool.query(
-      `
-      DELETE FROM wishlist_items
-      WHERE id = $1
-      AND wishlist_id = (
-        SELECT id FROM wishlists WHERE user_id = $2
-      )
-      RETURNING *
-      `,
-      [wishlist_item_id, user_id]
+      `DELETE FROM wishlist_items
+       WHERE id = $1
+       AND wishlist_id = (SELECT id FROM wishlists WHERE user_id = $2)
+       RETURNING *`,
+      [wishlist_item_id, userId]
     );
 
     if (result.rowCount === 0) {
-      return res.status(404).json({ message: "Item not found or unauthorized" });
+      return res.status(404).json({ success: false, message: "Item not found", code: "NOT_FOUND" });
     }
 
-    res.json({
-      message: "Item removed from wishlist",
-      data: result.rows[0],
-    });
+    res.json({ success: true, message: "Item removed from wishlist", data: result.rows[0] });
   } catch (error) {
-    res.status(500).json({ error: "Failed to remove item" });
+    console.error("removeFromWishlist error:", error);
+    res.status(500).json({ success: false, message: "Failed to remove item", code: "SERVER_ERROR" });
   }
 };

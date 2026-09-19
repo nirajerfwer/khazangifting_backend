@@ -10,6 +10,7 @@ import wishlistRoutes from "./routes/wishlistRoutes";
 import Crouter from "./routes/categoryRoutes";
 import Blogrouter from "./routes/blogsRoutes";
 import authRouter from "./routes/authRoutes";
+import orderRouter from "./routes/orderRoutes";
 
 dotenv.config();
 
@@ -39,6 +40,7 @@ app.use(
 app.use("/api/auth", authRouter);
 app.use("/api/cart", cartRoutes);
 app.use("/api/wishlist", wishlistRoutes);
+app.use("/api/orders", orderRouter);
 app.use("/products", Prouter);
 app.use("/category", Crouter);
 app.use("/blog", Blogrouter);

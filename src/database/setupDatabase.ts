@@ -75,6 +75,7 @@ export const setupDatabase = async () => {
       CREATE TABLE IF NOT EXISTS product_images (
         id SERIAL PRIMARY KEY,
         product_id INT REFERENCES products(id) ON DELETE CASCADE,
+        s3_key TEXT NOT NULL,
         image_url TEXT NOT NULL,
         alt_text VARCHAR(255),
         sort_order INT DEFAULT 0,
@@ -83,25 +84,57 @@ export const setupDatabase = async () => {
       );
     `);
 
+    // Migration: add s3_key to product_images if the table pre-existed without it
+    await pool.query(`
+      ALTER TABLE product_images ADD COLUMN IF NOT EXISTS s3_key TEXT;
+    `);
+
     // ORDERS
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id),
-        total_amount NUMERIC(10,2),
-        status VARCHAR(50) DEFAULT 'pending',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        total_amount NUMERIC(10,2) NOT NULL,
+        status VARCHAR(50) NOT NULL DEFAULT 'PENDING_PAYMENT',
+        shipping_address JSONB NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
-    // ORDER ITEMS
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'orders_status_check'
+        ) THEN
+          ALTER TABLE orders ADD CONSTRAINT orders_status_check
+            CHECK (status IN ('PENDING_PAYMENT','PAID','PROCESSING','PACKED','SHIPPED','DELIVERED','CANCELLED','REFUNDED'));
+        END IF;
+      END
+      $$;
+    `);
+
+    // ORDER ITEMS — price is a snapshot of the product price at order time
     await pool.query(`
       CREATE TABLE IF NOT EXISTS order_items (
         id SERIAL PRIMARY KEY,
         order_id UUID REFERENCES orders(id) ON DELETE CASCADE,
         product_id INT REFERENCES products(id),
-        quantity INT,
-        price NUMERIC(10,2)
+        product_name VARCHAR(255) NOT NULL,
+        quantity INT NOT NULL,
+        price NUMERIC(10,2) NOT NULL
+      );
+    `);
+
+    // ORDER STATUS HISTORY — audit trail for admin status changes
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS order_status_history (
+        id SERIAL PRIMARY KEY,
+        order_id UUID REFERENCES orders(id) ON DELETE CASCADE,
+        status VARCHAR(50) NOT NULL,
+        changed_by UUID REFERENCES users(id),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
@@ -223,6 +256,14 @@ await pool.query(`
 
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_blogs_slug ON blogs(slug);
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, created_at DESC);
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
     `);
 
     //trigger
