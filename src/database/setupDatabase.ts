@@ -16,9 +16,24 @@ export const setupDatabase = async () => {
         name VARCHAR(100),
         email VARCHAR(150) UNIQUE NOT NULL,
         password TEXT NOT NULL,
+        role VARCHAR(20) NOT NULL DEFAULT 'CUSTOMER',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+    `);
+
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'users_role_check'
+        ) THEN
+          ALTER TABLE users ADD CONSTRAINT users_role_check
+            CHECK (role IN ('SUPER_ADMIN', 'ADMIN', 'STAFF', 'CUSTOMER'));
+        END IF;
+      END
+      $$;
     `);
 
     // CATEGORIES
@@ -26,6 +41,7 @@ export const setupDatabase = async () => {
       CREATE TABLE IF NOT EXISTS categories (
         id SERIAL PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
+        slug VARCHAR(150) UNIQUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -33,11 +49,13 @@ export const setupDatabase = async () => {
     // PRODUCTS
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
-        id int PRIMARY KEY DEFAULT,
+        id SERIAL PRIMARY KEY,
+        sku VARCHAR(100) UNIQUE,
         name VARCHAR(255) NOT NULL,
         description TEXT,
         price NUMERIC(10,2) NOT NULL,
         stock INT DEFAULT 0,
+        category_id INT REFERENCES categories(id),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
@@ -56,8 +74,12 @@ export const setupDatabase = async () => {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS product_images (
         id SERIAL PRIMARY KEY,
-        product_id UUID REFERENCES products(id) ON DELETE CASCADE,
-        image_url TEXT NOT NULL
+        product_id INT REFERENCES products(id) ON DELETE CASCADE,
+        image_url TEXT NOT NULL,
+        alt_text VARCHAR(255),
+        sort_order INT DEFAULT 0,
+        is_primary BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
@@ -77,7 +99,7 @@ export const setupDatabase = async () => {
       CREATE TABLE IF NOT EXISTS order_items (
         id SERIAL PRIMARY KEY,
         order_id UUID REFERENCES orders(id) ON DELETE CASCADE,
-        product_id UUID REFERENCES products(id),
+        product_id INT REFERENCES products(id),
         quantity INT,
         price NUMERIC(10,2)
       );
@@ -98,7 +120,7 @@ export const setupDatabase = async () => {
   CREATE TABLE IF NOT EXISTS cart_items (
       id SERIAL PRIMARY KEY,
       cart_id UUID REFERENCES carts(id) ON DELETE CASCADE,
-      product_id UUID REFERENCES products(id) ON DELETE CASCADE,
+      product_id INT REFERENCES products(id) ON DELETE CASCADE,
       quantity INT NOT NULL DEFAULT 1,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -123,7 +145,7 @@ export const setupDatabase = async () => {
         CREATE TABLE IF NOT EXISTS wishlist_items (
     id SERIAL PRIMARY KEY,
     wishlist_id UUID REFERENCES wishlists(id) ON DELETE CASCADE,
-    product_id UUID REFERENCES products(id) ON DELETE CASCADE,
+    product_id INT REFERENCES products(id) ON DELETE CASCADE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(wishlist_id, product_id)
 );
@@ -156,6 +178,36 @@ await pool.query(`
 `);
 
 
+    // BLOGS
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS blogs (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        slug VARCHAR(255) UNIQUE NOT NULL,
+        excerpt TEXT,
+        content TEXT,
+        cover_image TEXT,
+        author_id UUID REFERENCES users(id),
+        published BOOLEAN NOT NULL DEFAULT FALSE,
+        published_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // AUDIT LOGS
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id SERIAL PRIMARY KEY,
+        user_id UUID REFERENCES users(id),
+        action VARCHAR(100) NOT NULL,
+        entity VARCHAR(100) NOT NULL,
+        entity_id VARCHAR(100),
+        metadata JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
     // INDEXES
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
@@ -163,6 +215,14 @@ await pool.query(`
 
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_products_created ON products(created_at);
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_blogs_published ON blogs(published, published_at DESC);
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_blogs_slug ON blogs(slug);
     `);
 
     //trigger
