@@ -23,6 +23,13 @@ export const setupDatabase = async () => {
       );
     `);
 
+    // Migration: these columns were added after the table may already have existed in
+    // production — CREATE TABLE IF NOT EXISTS above is a no-op on an existing table,
+    // so pre-existing installs need them backfilled explicitly.
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'CUSTOMER';`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
+
     await pool.query(`
       DO $$
       BEGIN
@@ -45,6 +52,7 @@ export const setupDatabase = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+    await pool.query(`ALTER TABLE categories ADD COLUMN IF NOT EXISTS slug VARCHAR(150);`);
 
     // PRODUCTS
     await pool.query(`
@@ -60,10 +68,32 @@ export const setupDatabase = async () => {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS sku VARCHAR(100);`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS category_id INT REFERENCES categories(id);`);
+
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'products_sku_key') THEN
+          ALTER TABLE products ADD CONSTRAINT products_sku_key UNIQUE (sku);
+        END IF;
+      END
+      $$;
+    `);
+
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'categories_slug_key') THEN
+          ALTER TABLE categories ADD CONSTRAINT categories_slug_key UNIQUE (slug);
+        END IF;
+      END
+      $$;
+    `);
 
     // PRODUCTS CATEGORIES
     await pool.query(`
-      CREATE TABLE product_categories (
+      CREATE TABLE IF NOT EXISTS product_categories (
           product_id int REFERENCES products(id) ON DELETE CASCADE,
           category_id INT REFERENCES categories(id) ON DELETE CASCADE,
           PRIMARY KEY (product_id, category_id)
@@ -123,6 +153,9 @@ export const setupDatabase = async () => {
     await pool.query(`
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS razorpay_payment_id VARCHAR(100) UNIQUE;
     `);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_address JSONB;`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
+    await pool.query(`ALTER TABLE orders ALTER COLUMN total_amount SET NOT NULL;`).catch(() => {});
 
     // ORDER ITEMS — price is a snapshot of the product price at order time
     await pool.query(`
@@ -236,6 +269,10 @@ await pool.query(`
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    await pool.query(`ALTER TABLE blogs ADD COLUMN IF NOT EXISTS author_id UUID REFERENCES users(id);`);
+    await pool.query(`ALTER TABLE blogs ADD COLUMN IF NOT EXISTS published_at TIMESTAMP;`);
+    await pool.query(`ALTER TABLE blogs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
 
     // PASSWORD RESET TOKENS — store a hash of the token, never the raw value
     await pool.query(`
