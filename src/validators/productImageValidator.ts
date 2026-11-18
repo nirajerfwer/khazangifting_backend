@@ -11,6 +11,10 @@ export const confirmImageSchema = z.object({
   isPrimary: z.boolean().optional(),
 });
 
+export const imageAltSchema = z.object({
+  altText: z.string().trim().max(255).nullable(),
+});
+
 export const reorderImagesSchema = z.object({
   order: z.array(z.number().int().positive()).min(1),
 });

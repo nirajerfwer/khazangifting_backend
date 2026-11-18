@@ -1,4 +1,5 @@
 import { pool } from "./db";
+import { runAdminMigration } from "./adminMigration";
 
 export const setupDatabase = async () => {
   try {
@@ -118,6 +119,12 @@ export const setupDatabase = async () => {
     await pool.query(`
       ALTER TABLE product_images ADD COLUMN IF NOT EXISTS s3_key TEXT;
     `);
+    // The live product_images table predates these columns (it only had id, product_id,
+    // image_url, s3_key); the image admin and all storefront image queries rely on them.
+    await pool.query(`ALTER TABLE product_images ADD COLUMN IF NOT EXISTS alt_text VARCHAR(255);`);
+    await pool.query(`ALTER TABLE product_images ADD COLUMN IF NOT EXISTS sort_order INT DEFAULT 0;`);
+    await pool.query(`ALTER TABLE product_images ADD COLUMN IF NOT EXISTS is_primary BOOLEAN DEFAULT FALSE;`);
+    await pool.query(`ALTER TABLE product_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;`);
 
     // ORDERS
     await pool.query(`
@@ -320,7 +327,128 @@ await pool.query(`
       );
     `);
 
+    // ─── E-COMMERCE MIGRATION (cart / wishlist / checkout) ─────────────────────
+    // Additive and idempotent: safe to re-run on an existing database.
+
+    // Products: soft-deactivation, per-product inventory tracking, compare-at price for discounts.
+    // track_inventory defaults to FALSE so existing products (imported with stock = 0) remain
+    // purchasable as made-to-order; admins opt individual products into stock enforcement.
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS track_inventory BOOLEAN NOT NULL DEFAULT FALSE;`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS compare_at_price NUMERIC(10,2);`);
+    await pool.query(`UPDATE products SET stock = 0 WHERE stock IS NULL OR stock < 0;`);
+    await pool.query(`ALTER TABLE products ALTER COLUMN stock SET DEFAULT 0;`);
+    await pool.query(`ALTER TABLE products ALTER COLUMN stock SET NOT NULL;`);
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'products_stock_nonnegative') THEN
+          ALTER TABLE products ADD CONSTRAINT products_stock_nonnegative CHECK (stock >= 0);
+        END IF;
+      END
+      $$;
+    `);
+
+    // One cart / one wishlist per user. Merge any historical duplicates first so the unique
+    // constraint can be created, then rely on it for atomic get-or-create (ON CONFLICT).
+    await pool.query(`
+      WITH ranked AS (
+        SELECT id, user_id, FIRST_VALUE(id) OVER (PARTITION BY user_id ORDER BY created_at, id) AS keep_id
+        FROM carts WHERE user_id IS NOT NULL
+      )
+      INSERT INTO cart_items (cart_id, product_id, quantity)
+      SELECT r.keep_id, ci.product_id, ci.quantity FROM cart_items ci JOIN ranked r ON r.id = ci.cart_id
+      WHERE r.id <> r.keep_id
+      ON CONFLICT (cart_id, product_id) DO UPDATE SET quantity = GREATEST(cart_items.quantity, EXCLUDED.quantity);
+    `);
+    await pool.query(`
+      DELETE FROM carts c USING carts k
+      WHERE c.user_id = k.user_id AND (c.created_at, c.id::text) > (k.created_at, k.id::text);
+    `);
+    await pool.query(`
+      WITH ranked AS (
+        SELECT id, user_id, FIRST_VALUE(id) OVER (PARTITION BY user_id ORDER BY created_at, id) AS keep_id
+        FROM wishlists WHERE user_id IS NOT NULL
+      )
+      INSERT INTO wishlist_items (wishlist_id, product_id)
+      SELECT r.keep_id, wi.product_id FROM wishlist_items wi JOIN ranked r ON r.id = wi.wishlist_id
+      WHERE r.id <> r.keep_id
+      ON CONFLICT (wishlist_id, product_id) DO NOTHING;
+    `);
+    await pool.query(`
+      DELETE FROM wishlists w USING wishlists k
+      WHERE w.user_id = k.user_id AND (w.created_at, w.id::text) > (k.created_at, k.id::text);
+    `);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_carts_user ON carts(user_id);`);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_wishlists_user ON wishlists(user_id);`);
+
+    await pool.query(`DELETE FROM cart_items WHERE quantity IS NULL OR quantity <= 0;`);
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'cart_items_quantity_positive') THEN
+          ALTER TABLE cart_items ADD CONSTRAINT cart_items_quantity_positive CHECK (quantity > 0);
+        END IF;
+      END
+      $$;
+    `);
+
+    // Orders: price breakdown, payment status, billing address, idempotent creation.
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10,2);`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_amount NUMERIC(10,2) NOT NULL DEFAULT 0;`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_amount NUMERIC(10,2) NOT NULL DEFAULT 0;`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20) NOT NULL DEFAULT 'PENDING';`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS billing_address JSONB;`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS idempotency_key UUID;`);
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'orders_payment_status_check') THEN
+          ALTER TABLE orders ADD CONSTRAINT orders_payment_status_check
+            CHECK (payment_status IN ('PENDING','PAID','FAILED','REFUNDED'));
+        END IF;
+      END
+      $$;
+    `);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_user_idempotency ON orders(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL;`);
+
+    // Order items: the live table was created with product_id as UUID, but products.id is an
+    // integer. Convert it only while the table is empty; with existing rows, stop loudly
+    // rather than guess at a data conversion.
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF (SELECT data_type FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'order_items' AND column_name = 'product_id') = 'uuid' THEN
+          IF EXISTS (SELECT 1 FROM order_items) THEN
+            RAISE EXCEPTION 'order_items.product_id is UUID and the table has rows; convert it manually to INT before running this migration';
+          END IF;
+          ALTER TABLE order_items ALTER COLUMN product_id TYPE INT USING NULL;
+        END IF;
+      END
+      $$;
+    `);
+
+    // Order items: the live table predates product_name; add the snapshot columns.
+    await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS product_name VARCHAR(255);`);
+    await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS sku VARCHAR(100);`);
+    await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS inventory_tracked BOOLEAN NOT NULL DEFAULT FALSE;`);
+
+    // Admin panel schema (brands, category tree, catalog fields, inventory ledger, refunds).
+    await runAdminMigration(pool);
+
     // INDEXES
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_cart_items_product ON cart_items(product_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_wishlist_items_product ON wishlist_items(product_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_items_product ON order_items(product_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_status_history_order ON order_status_history(order_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_product_images_product ON product_images(product_id, is_primary DESC, sort_order);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_product_categories_category ON product_categories(category_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_product_bulk_pricing_product ON product_bulk_pricing(product_id, min_quantity);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_addresses_user ON addresses(user_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_products_active_created ON products(is_active, created_at DESC);`);
+
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
     `);
@@ -398,6 +526,8 @@ await pool.query(`
     console.log("✅ Database setup complete!");
   } catch (error) {
     console.error("❌ Error setting up database:", error);
+    // Non-zero exit so CI/deploy scripts notice a failed migration.
+    process.exitCode = 1;
   }
 };
 

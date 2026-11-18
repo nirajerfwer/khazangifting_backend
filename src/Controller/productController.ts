@@ -4,175 +4,156 @@ import { pool } from "../database/db";
 import path from "path";
 import fs from "fs";
 import * as XLSX from "xlsx";
-// GET all products
+import { isStaff } from "../middleware/auth";
+import { pagination } from "../middleware/validate";
+
+// Whitelisted sort orders — user input never reaches the SQL text directly.
+const SORTS: Record<string, string> = {
+  newest: "p.created_at DESC, p.id DESC",
+  "price-asc": "p.price ASC, p.id ASC",
+  "price-desc": "p.price DESC, p.id DESC",
+  name: "p.name ASC, p.id ASC",
+};
+
+// Only the columns listing cards need (no full descriptions), plus the primary image.
+const LIST_COLUMNS = `p.id, p.sku, p.name, LEFT(p.description, 200) AS description, p.price, p.compare_at_price,
+  p.stock, p.track_inventory, p.is_active, p.category_id, p.created_at,
+  img.image_url AS image,
+  (NOT p.track_inventory OR p.stock > 0) AS in_stock`;
+
+const PRIMARY_IMAGE_JOIN = `LEFT JOIN LATERAL (
+    SELECT pi.image_url FROM product_images pi WHERE pi.product_id = p.id
+    ORDER BY pi.is_primary DESC, pi.sort_order ASC, pi.id ASC LIMIT 1
+  ) img ON TRUE`;
+
+// Escapes LIKE wildcards (and the escape char) so search text is matched literally.
+const escapeLike = (s: string) => s.replace(/[\\%_]/g, (m) => `\\${m}`);
+
+// GET all products (public). Inactive products are hidden unless a staff user asks for them.
 export const getProducts = async (req: Request, res: Response) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const limit = Math.min(50, parseInt(req.query.limit as string) || 10);
+    const { page, limit } = pagination(req.query, 10, 50);
     const offset = (page - 1) * limit;
+    const { category, minPrice, maxPrice, inStock, q, sort, includeInactive } = req.query;
 
-    const { category, minPrice, maxPrice, inStock } = req.query;
+    const conditions: string[] = [];
+    const values: any[] = [];
 
-    let query = `
-      SELECT DISTINCT p.* 
-      FROM products p
-    `;
+    if (!(includeInactive === "true" && isStaff(req))) {
+      conditions.push("p.is_active = TRUE");
+    }
 
-    let countQuery = `
-      SELECT COUNT(DISTINCT p.id) 
-      FROM products p
-    `;
-
-    let conditions: string[] = [];
-    let values: any[] = [];
-
-    // 👉 CATEGORY FILTER (if using mapping table)
+    // Category filter via EXISTS instead of JOIN + DISTINCT: no duplicate rows, and the
+    // planner can use the product_categories(category_id) index.
     if (category) {
-      query += ` JOIN product_categories pc ON pc.product_id = p.id`;
-      countQuery += ` JOIN product_categories pc ON pc.product_id = p.id`;
-
-      const categoryArray = (category as string).split(",");
-      conditions.push(`pc.category_id = ANY($${values.length + 1})`);
-      values.push(categoryArray);
+      const ids = String(category)
+        .split(",")
+        .map((c) => parseInt(c, 10))
+        .filter((n) => Number.isInteger(n) && n > 0);
+      if (ids.length > 0) {
+        values.push(ids);
+        conditions.push(
+          `EXISTS (SELECT 1 FROM product_categories pc WHERE pc.product_id = p.id AND pc.category_id = ANY($${values.length}::int[]))`
+        );
+      }
     }
 
-    // 👉 PRICE RANGE
-    if (minPrice) {
-      conditions.push(`p.price >= $${values.length + 1}`);
-      values.push(minPrice);
+    const min = Number(minPrice);
+    if (minPrice !== undefined && minPrice !== "" && Number.isFinite(min)) {
+      values.push(min);
+      conditions.push(`p.price >= $${values.length}`);
+    }
+    const max = Number(maxPrice);
+    if (maxPrice !== undefined && maxPrice !== "" && Number.isFinite(max)) {
+      values.push(max);
+      conditions.push(`p.price <= $${values.length}`);
     }
 
-    if (maxPrice) {
-      conditions.push(`p.price <= $${values.length + 1}`);
-      values.push(maxPrice);
+    if (inStock === "true") {
+      conditions.push("(NOT p.track_inventory OR p.stock > 0)");
     }
 
-    // // 👉 STOCK FILTER
-    // if (inStock === "true") {
-    //   conditions.push(`p.stock > 0`);
-    // }
-
-    // 👉 APPLY CONDITIONS
-    if (conditions.length > 0) {
-      const whereClause = ` WHERE ` + conditions.join(" AND ");
-      query += whereClause;
-      countQuery += whereClause;
+    if (typeof q === "string" && q.trim()) {
+      values.push(`%${escapeLike(q.trim().slice(0, 100))}%`);
+      conditions.push(`(p.name ILIKE $${values.length} OR p.sku ILIKE $${values.length})`);
     }
 
-    // 👉 FINAL QUERY
-    query += `
-      ORDER BY p.created_at DESC
-      LIMIT $${values.length + 1}
-      OFFSET $${values.length + 2}
-    `;
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const orderBy = SORTS[String(sort)] ?? SORTS.newest;
 
-    const finalValues = [...values, limit, offset];
-
-    const result = await pool.query(query, finalValues);
-
-    // 👉 COUNT
-    const totalResult = await pool.query(countQuery, values);
-    const total = parseInt(totalResult.rows[0].count);
+    const [result, totalResult] = await Promise.all([
+      pool.query(
+        `SELECT ${LIST_COLUMNS} FROM products p ${PRIMARY_IMAGE_JOIN} ${where}
+         ORDER BY ${orderBy} LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+        [...values, limit, offset]
+      ),
+      pool.query(`SELECT COUNT(*)::int AS count FROM products p ${where}`, values),
+    ]);
+    const total = totalResult.rows[0].count as number;
 
     res.json({
+      success: true,
       data: result.rows,
-      pagination: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit),
-      },
+      pagination: { total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)) },
     });
-
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to fetch products" });
+    console.error("getProducts error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch products", code: "SERVER_ERROR" });
   }
 };
 
 export const getSingleProduct = async (req: Request, res: Response) => {
   try {
-    const id = req.params.id;
+    const id = parseInt(String(req.params.id), 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(404).json({ success: false, message: "Product not found", code: "NOT_FOUND" });
+    }
 
-    const result = await pool.query(
-      `SELECT 
-        p.*,
-        COALESCE(
-          JSON_AGG(pi.image_url) FILTER (WHERE pi.image_url IS NOT NULL), 
-          '[]'
-        ) AS images
-      FROM products p
-      LEFT JOIN product_images pi ON pi.product_id = p.id
-      WHERE p.id = $1
-      GROUP BY p.id`,
-      [id]
-    );
+    const [productResult, imagesResult, tiersResult] = await Promise.all([
+      pool.query(
+        // Explicit public columns only: admin-only fields (cost_price, gst/hsn, etc.) never leave the server.
+        `SELECT p.id, p.name, p.slug, p.sku, p.description, p.short_description, p.price, p.compare_at_price,
+                p.stock, p.track_inventory, p.is_active, p.is_featured, p.category_id, p.brand_id, p.attributes,
+                p.seo_title, p.seo_description, b.name AS brand_name,
+                COALESCE(m.min_quantity, 1) AS min_quantity, m.moq_note,
+                (NOT p.track_inventory OR p.stock > 0) AS in_stock
+         FROM products p LEFT JOIN product_moq m ON m.product_id = p.id LEFT JOIN brands b ON b.id = p.brand_id
+         WHERE p.id = $1`,
+        [id]
+      ),
+      pool.query(
+        "SELECT image_url, alt_text FROM product_images WHERE product_id=$1 ORDER BY is_primary DESC, sort_order ASC, id ASC",
+        [id]
+      ),
+      pool.query(
+        "SELECT min_quantity, price_per_unit, discount_percent FROM product_bulk_pricing WHERE product_id=$1 ORDER BY min_quantity",
+        [id]
+      ),
+    ]);
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        message: "Product not found",
-      });
+    const product = productResult.rows[0];
+    // Inactive products 404 for the public, but staff can still open them in the admin editor.
+    if (!product || (!product.is_active && !isStaff(req))) {
+      return res.status(404).json({ success: false, message: "Product not found", code: "NOT_FOUND" });
     }
 
     res.json({
-      data: result.rows[0],
+      success: true,
       message: "Product found",
+      data: {
+        ...product,
+        // stock is only meaningful when inventory is tracked; null signals "made to order".
+        stock_available: product.track_inventory ? Math.max(0, product.stock) : null,
+        images: imagesResult.rows.map((r) => r.image_url),
+        image_details: imagesResult.rows,
+        bulk_pricing: tiersResult.rows,
+      },
     });
-
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to fetch product" });
+    console.error("getSingleProduct error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch product", code: "SERVER_ERROR" });
   }
 };
-
-// CREATE product
-export const createProduct = async (req: Request, res: Response) => {
-  const { name, description, price, stock, category_id } = req.body;
-
-  try {
-    const result = await pool.query(
-      `INSERT INTO products (name, description, price, stock, category_id)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [name, description, price, stock, category_id]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to create product" });
-  }
-};
-
-// UPDATE product
-export const updateProduct = async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const { name, description, price, stock, category_id } = req.body;
-
-  try {
-    const result = await pool.query(
-      `UPDATE products 
-       SET name=$1, description=$2, price=$3, stock=$4, category_id=$5, updated_at=NOW()
-       WHERE id=$6 RETURNING *`,
-      [name, description, price, stock, category_id, id]
-    );
-
-    res.json(result.rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to update product" });
-  }
-};
-
-// DELETE product
-export const deleteProduct = async (req: Request, res: Response) => {
-  const { id } = req.params;
-
-  try {
-    await pool.query("DELETE FROM products WHERE id=$1", [id]);
-    res.json({ message: "Product deleted" });
-  } catch (error) {
-    res.status(500).json({ error: "Failed to delete product" });
-  }
-};
-
 
 export const createProductByLookingAtSheet = async (req: Request, res: Response) => {
   const client = await pool.connect();

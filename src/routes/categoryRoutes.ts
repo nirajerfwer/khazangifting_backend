@@ -1,12 +1,17 @@
 import express from "express";
-import { createCategory, deleteCategory, getCategorys, updateCategory } from "../Controller/CategoryController";
+import { getCategorys } from "../Controller/CategoryController";
+import { createCategory, deleteCategory, updateCategory } from "../Controller/adminController";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { validateBody, validateParam } from "../middleware/validate";
+import { categorySchema } from "../validators/adminValidator";
 
 const Crouter = express.Router();
+const adminOnly = [requireAuth, requireRole("ADMIN", "SUPER_ADMIN")];
 
 Crouter.get("/", getCategorys);
-Crouter.post("/", requireAuth, requireRole("ADMIN", "SUPER_ADMIN"), createCategory);
-Crouter.put("/:id", requireAuth, requireRole("ADMIN", "SUPER_ADMIN"), updateCategory);
-Crouter.delete("/:id", requireAuth, requireRole("ADMIN", "SUPER_ADMIN"), deleteCategory);
+// Legacy write paths, kept for backward compatibility; they share the /api/admin/categories handlers.
+Crouter.post("/", ...adminOnly, validateBody(categorySchema), createCategory);
+Crouter.put("/:id", ...adminOnly, validateParam("id", "int"), validateBody(categorySchema), updateCategory);
+Crouter.delete("/:id", ...adminOnly, validateParam("id", "int"), deleteCategory);
 
 export default Crouter;

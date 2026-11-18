@@ -16,8 +16,10 @@ const EXTENSION_BY_TYPE: Record<string, string> = {
 };
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB
 
+export type UploadFolder = "products" | "blog" | "categories" | "brands";
+
 interface PresignParams {
-  folder: "products" | "blog";
+  folder: UploadFolder;
   entityId: string | number;
   contentType: string;
 }
@@ -58,6 +60,13 @@ export const buildPublicUrl = (key: string) => {
   return `https://${BUCKET}.s3.${REGION}.amazonaws.com/${key}`;
 };
 
-export const deleteS3Object = async (key: string) => {
+// Accepts only keys that this app issued for the given folder (e.g. "brands/assets/<uuid>.png"),
+// so an admin form can't point an image field at an arbitrary URL or another folder's object.
+export const publicUrlForOwnedKey = (folder: UploadFolder, key: string) => {
+  if (!/^[a-z]+\/[A-Za-z0-9_-]+\/[0-9a-f-]{36}\.(jpg|png|webp|avif)$/.test(key) || !key.startsWith(`${folder}/`)) return null;
+  return buildPublicUrl(key);
+};
+
+export const deleteS3Object =async (key: string) => {
   await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
 };

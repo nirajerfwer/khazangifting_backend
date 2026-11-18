@@ -86,12 +86,27 @@ export const refresh = async (req: Request, res: Response) => {
     return res.status(401).json({ success: false, message: "No refresh token", code: "NO_REFRESH_TOKEN" });
   }
 
+  let payload;
   try {
-    const payload = verifyRefreshToken(token);
-    const accessToken = signAccessToken({ sub: payload.sub, role: payload.role });
-    res.json({ success: true, data: { accessToken } });
+    payload = verifyRefreshToken(token);
   } catch {
     return res.status(401).json({ success: false, message: "Invalid or expired refresh token", code: "INVALID_REFRESH_TOKEN" });
+  }
+
+  try {
+    // Re-read the user so a deactivated account can't keep minting access tokens for the
+    // refresh token's 30-day lifetime, and role changes take effect on the next refresh.
+    const result = await pool.query("SELECT role, is_active FROM users WHERE id=$1", [payload.sub]);
+    const user = result.rows[0];
+    if (!user || !user.is_active) {
+      res.clearCookie("refreshToken", { path: "/api/auth" });
+      return res.status(401).json({ success: false, message: "Invalid or expired refresh token", code: "INVALID_REFRESH_TOKEN" });
+    }
+    const accessToken = signAccessToken({ sub: payload.sub, role: user.role });
+    res.json({ success: true, data: { accessToken } });
+  } catch (error) {
+    console.error("refresh error:", error);
+    res.status(500).json({ success: false, message: "Failed to refresh session", code: "SERVER_ERROR" });
   }
 };
 

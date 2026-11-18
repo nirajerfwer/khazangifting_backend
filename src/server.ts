@@ -15,6 +15,7 @@ import adminRouter from "./routes/adminRoutes";
 import paymentRouter from "./routes/paymentRoutes";
 import accountRouter from "./routes/accountRoutes";
 import { razorpayWebhook } from "./Controller/paymentController";
+import { HttpError } from "./utils/httpError";
 
 dotenv.config();
 
@@ -68,11 +69,25 @@ app.use((req: Request, res: Response) => {
 
 // Centralized error handler — never leak stack traces to clients.
 app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
-  console.error(err);
-  res.status(err?.status || 500).json({
+  // Expected, client-facing errors from the service layer.
+  if (err instanceof HttpError) {
+    return res.status(err.status).json({
+      success: false,
+      message: err.message,
+      code: err.code,
+      ...(err.details !== undefined ? { details: err.details } : {}),
+    });
+  }
+  // Malformed JSON bodies from express.json().
+  if (err?.type === "entity.parse.failed") {
+    return res.status(400).json({ success: false, message: "Malformed JSON body", code: "BAD_REQUEST" });
+  }
+  console.error(`[${req.method} ${req.originalUrl}]`, err);
+  const status = Number.isInteger(err?.status) && err.status >= 400 && err.status < 600 ? err.status : 500;
+  res.status(status).json({
     success: false,
-    message: process.env.NODE_ENV === "production" ? "Internal server error" : err?.message || "Internal server error",
-    code: "SERVER_ERROR",
+    message: status < 500 ? err.message : process.env.NODE_ENV === "production" ? "Internal server error" : err?.message || "Internal server error",
+    code: status < 500 ? "BAD_REQUEST" : "SERVER_ERROR",
   });
 });
 

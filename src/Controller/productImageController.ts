@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { pool } from "../database/db";
+import { pool, withTransaction } from "../database/db";
 import { buildPublicUrl, deleteS3Object, generatePresignedUpload } from "../utils/s3";
 import { recordAuditLog } from "../utils/auditLog";
 
@@ -35,37 +35,33 @@ export const confirmImage = async (req: Request, res: Response) => {
     return res.status(422).json({ success: false, message: "Key does not match product", code: "KEY_MISMATCH" });
   }
 
-  const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+    const image = await withTransaction(async (client) => {
+      if (isPrimary) {
+        await client.query("UPDATE product_images SET is_primary = FALSE WHERE product_id=$1", [productId]);
+      }
 
-    if (isPrimary) {
-      await client.query("UPDATE product_images SET is_primary = FALSE WHERE product_id=$1", [productId]);
-    }
+      const imageUrl = buildPublicUrl(key);
 
-    const imageUrl = buildPublicUrl(key);
+      const sortResult = await client.query(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM product_images WHERE product_id=$1",
+        [productId]
+      );
 
-    const sortResult = await client.query(
-      "SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM product_images WHERE product_id=$1",
-      [productId]
-    );
+      const result = await client.query(
+        `INSERT INTO product_images (product_id, s3_key, image_url, alt_text, sort_order, is_primary)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        [productId, key, imageUrl, altText ?? null, sortResult.rows[0].next, Boolean(isPrimary)]
+      );
+      return result.rows[0];
+    });
+    // Audit only after the transaction released its connection (avoids pool starvation).
+    await recordAuditLog(req.user!.sub, "CREATE", "product_image", image.id, { productId });
 
-    const result = await client.query(
-      `INSERT INTO product_images (product_id, s3_key, image_url, alt_text, sort_order, is_primary)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [productId, key, imageUrl, altText ?? null, sortResult.rows[0].next, Boolean(isPrimary)]
-    );
-
-    await client.query("COMMIT");
-    await recordAuditLog(req.user!.sub, "CREATE", "product_image", result.rows[0].id, { productId });
-
-    res.status(201).json({ success: true, data: result.rows[0] });
+    res.status(201).json({ success: true, data: image });
   } catch (error) {
-    await client.query("ROLLBACK");
     console.error("confirmImage error:", error);
     res.status(500).json({ success: false, message: "Failed to save image", code: "SERVER_ERROR" });
-  } finally {
-    client.release();
   }
 };
 
@@ -107,6 +103,22 @@ export const deleteImage = async (req: Request, res: Response) => {
   } catch (error) {
     console.error("deleteImage error:", error);
     res.status(500).json({ success: false, message: "Failed to delete image", code: "SERVER_ERROR" });
+  }
+};
+
+// Updates the alt text of an existing image (SEO / accessibility).
+export const updateImageAlt = async (req: Request, res: Response) => {
+  const { productId, imageId } = req.params;
+  try {
+    const r = await pool.query(
+      "UPDATE product_images SET alt_text=$1 WHERE id=$2 AND product_id=$3 RETURNING id, image_url, alt_text, sort_order, is_primary",
+      [req.body.altText ?? null, imageId, productId]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ success: false, message: "Image not found", code: "NOT_FOUND" });
+    res.json({ success: true, data: r.rows[0] });
+  } catch (error) {
+    console.error("updateImageAlt error:", error);
+    res.status(500).json({ success: false, message: "Failed to update image", code: "SERVER_ERROR" });
   }
 };
 

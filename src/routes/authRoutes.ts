@@ -24,7 +24,16 @@ const forgotPasswordLimiter = rateLimit({
   message: { success: false, message: "Too many requests, please try again later", code: "RATE_LIMITED" },
 });
 
-authRouter.post("/register", validateBody(registerSchema), register);
+// Limits scripted account creation / email enumeration via the "already registered" response.
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many accounts created, please try again later", code: "RATE_LIMITED" },
+});
+
+authRouter.post("/register", registerLimiter, validateBody(registerSchema), register);
 authRouter.post("/login", loginLimiter, validateBody(loginSchema), login);
 authRouter.post("/refresh", refresh);
 authRouter.post("/logout", logout);
