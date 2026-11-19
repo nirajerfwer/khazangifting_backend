@@ -4,9 +4,12 @@ import { createCategory, deleteCategory, updateCategory } from "../Controller/ad
 import { requireAuth, requireRole } from "../middleware/auth";
 import { validateBody, validateParam } from "../middleware/validate";
 import { categorySchema } from "../validators/adminValidator";
+import { revalidateOnWrite } from "../utils/frontendRevalidate";
 
 const Crouter = express.Router();
 const adminOnly = [requireAuth, requireRole("ADMIN", "SUPER_ADMIN")];
+
+Crouter.use(revalidateOnWrite(() => ({ categories: true, listings: true })));
 
 Crouter.get("/", getCategorys);
 // Legacy write paths, kept for backward compatibility; they share the /api/admin/categories handlers.

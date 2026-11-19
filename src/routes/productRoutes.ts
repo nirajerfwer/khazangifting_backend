@@ -5,9 +5,13 @@ import { attachUserIfPresent, requireAuth, requireRole } from "../middleware/aut
 import { validateBody, validateParam } from "../middleware/validate";
 import { adminProductSchema } from "../validators/adminValidator";
 import productImageRoutes from "./productImageRoutes";
+import { productRevalidatePayload, revalidateOnWrite } from "../utils/frontendRevalidate";
 
 const Prouter = express.Router();
 const adminOnly = [requireAuth, requireRole("ADMIN", "SUPER_ADMIN")];
+
+// Successful writes (incl. image changes) refresh the storefront cache (no-op unless configured).
+Prouter.use(revalidateOnWrite(productRevalidatePayload));
 
 Prouter.use("/:productId/images", productImageRoutes);
 

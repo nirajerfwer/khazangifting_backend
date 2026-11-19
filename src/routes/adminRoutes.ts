@@ -2,6 +2,7 @@ import express from "express";
 import rateLimit from "express-rate-limit";
 import * as admin from "../Controller/adminController";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { adminRevalidatePayload, revalidateOnWrite } from "../utils/frontendRevalidate";
 import { validateBody, validateParam } from "../middleware/validate";
 import {
   adminOrderStatusSchema,
@@ -34,6 +35,8 @@ const writeLimiter = rateLimit({
   message: { success: false, message: "Too many changes in a short time, please slow down", code: "RATE_LIMITED" },
 });
 adminRouter.use((req, res, next) => (req.method === "GET" ? next() : writeLimiter(req, res, next)));
+// Successful catalogue writes refresh the storefront's cached pages (no-op unless configured).
+adminRouter.use(revalidateOnWrite(adminRevalidatePayload));
 
 const intId = validateParam("id", "int");
 const uuidId = validateParam("id", "uuid");

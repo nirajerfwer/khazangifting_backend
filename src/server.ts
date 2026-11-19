@@ -4,6 +4,7 @@ import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
+import { timingSafeEqual } from "crypto";
 import Prouter from "./routes/productRoutes";
 import cartRoutes from "./routes/cartRoutes";
 import wishlistRoutes from "./routes/wishlistRoutes";
@@ -38,12 +39,25 @@ app.use(
   })
 );
 
+// The Next.js storefront renders product/category pages on its servers, so every search-engine
+// crawl of the site arrives here from a handful of storefront IPs. Requests carrying the shared
+// INTERNAL_API_KEY are exempt from the per-IP limit so crawlers never receive 429/5xx pages.
+// Disabled unless INTERNAL_API_KEY is set (to a long random value) on both services.
+const internalKey = process.env.INTERNAL_API_KEY ? Buffer.from(process.env.INTERNAL_API_KEY) : null;
+const isInternalRequest = (req: Request) => {
+  const provided = req.get("x-internal-api-key");
+  if (!internalKey || !provided) return false;
+  const p = Buffer.from(provided);
+  return p.length === internalKey.length && timingSafeEqual(p, internalKey);
+};
+
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 300,
     standardHeaders: true,
     legacyHeaders: false,
+    skip: isInternalRequest,
   })
 );
 

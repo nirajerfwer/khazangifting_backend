@@ -17,7 +17,7 @@ const SORTS: Record<string, string> = {
 
 // Only the columns listing cards need (no full descriptions), plus the primary image.
 const LIST_COLUMNS = `p.id, p.sku, p.name, LEFT(p.description, 200) AS description, p.price, p.compare_at_price,
-  p.stock, p.track_inventory, p.is_active, p.category_id, p.created_at,
+  p.stock, p.track_inventory, p.is_active, p.category_id, p.created_at, p.updated_at,
   img.image_url AS image,
   (NOT p.track_inventory OR p.stock > 0) AS in_stock`;
 
@@ -114,7 +114,7 @@ export const getSingleProduct = async (req: Request, res: Response) => {
         // Explicit public columns only: admin-only fields (cost_price, gst/hsn, etc.) never leave the server.
         `SELECT p.id, p.name, p.slug, p.sku, p.description, p.short_description, p.price, p.compare_at_price,
                 p.stock, p.track_inventory, p.is_active, p.is_featured, p.category_id, p.brand_id, p.attributes,
-                p.seo_title, p.seo_description, b.name AS brand_name,
+                p.seo_title, p.seo_description, p.updated_at, b.name AS brand_name,
                 COALESCE(m.min_quantity, 1) AS min_quantity, m.moq_note,
                 (NOT p.track_inventory OR p.stock > 0) AS in_stock
          FROM products p LEFT JOIN product_moq m ON m.product_id = p.id LEFT JOIN brands b ON b.id = p.brand_id
